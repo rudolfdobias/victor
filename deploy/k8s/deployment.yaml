@@ -1,0 +1,79 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: victor
+  namespace: victor
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: victor
+  template:
+    metadata:
+      labels:
+        app: victor
+        # Required for Azure Workload Identity to inject the federated token
+        azure.workload.identity/use: "true"
+    spec:
+      serviceAccountName: victor
+
+      # Prevent multiple replicas from running concurrently (Victor is stateful via job queue)
+      terminationGracePeriodSeconds: 60
+
+      containers:
+        - name: victor
+          image: <REGISTRY>/victor:latest
+          imagePullPolicy: Always
+          ports:
+            - name: http
+              containerPort: 8080
+              protocol: TCP
+
+          volumeMounts:
+            - name: config
+              mountPath: /config
+              readOnly: true
+            - name: workspace
+              mountPath: /workspace
+
+          livenessProbe:
+            httpGet:
+              path: /healthz/live
+              port: http
+            initialDelaySeconds: 10
+            periodSeconds: 30
+            failureThreshold: 3
+
+          readinessProbe:
+            httpGet:
+              path: /healthz/ready
+              port: http
+            initialDelaySeconds: 15
+            periodSeconds: 10
+            failureThreshold: 3
+
+          resources:
+            requests:
+              cpu: 100m
+              memory: 256Mi
+            limits:
+              cpu: 1000m
+              memory: 512Mi
+
+          env:
+            - name: ASPNETCORE_URLS
+              value: "http://+:8080"
+            - name: DOTNET_ENVIRONMENT
+              value: "Production"
+
+      volumes:
+        - name: config
+          configMap:
+            name: victor-config
+            items:
+              - key: config.yaml
+                path: config.yaml
+              - key: persona.md
+                path: persona.md
+        - name: workspace
+          emptyDir: {}

@@ -1,0 +1,15 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(dotnet new:*)",
+      "Bash(dotnet sln:*)",
+      "Bash(dotnet build:*)",
+      "Bash(dotnet restore:*)",
+      "Bash(dotnet list:*)",
+      "WebFetch(domain:raw.githubusercontent.com)",
+      "Bash(dotnet package:*)",
+      "Bash(dotnet tool:*)",
+      "Read(//Users/rudolfdobias/.nuget/packages/slacknet/0.17.10/lib/**)"
+    ]
+  }
+}

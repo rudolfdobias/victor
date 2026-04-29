@@ -1,0 +1,106 @@
+# Victor configuration
+# All secrets should be stored in Azure Key Vault and referenced here as placeholders.
+# The Key Vault URI is set in keyVault:endpoint; secrets are injected automatically
+# via Azure Workload Identity at startup.
+
+# --- Azure Key Vault ---
+keyVault:
+  # Set to the Key Vault URI to enable secret injection at startup.
+  # Leave empty (or omit) to skip Key Vault — useful in local development.
+  endpoint: ""
+
+# --- Database (PostgreSQL + pgvector) ---
+database:
+  connectionString: "Host=localhost;Port=5432;Database=victor;Username=victor;Password=changeme"
+
+# --- LLM provider ---
+llm:
+  openai:
+    # Recommended: store in Key Vault as "llm--openai--apiKey"
+    apiKey: ""
+    model: "gpt-4o"
+    embeddingModel: "text-embedding-3-small"
+    embeddingDimensions: 1536
+
+# --- Slack ---
+slack:
+  # Bot token (xoxb-...) — store in Key Vault as "slack--botToken"
+  botToken: ""
+  # App-level token for Socket Mode (xapp-...) — store in Key Vault as "slack--appToken"
+  appToken: ""
+  # Channel where Victor posts unsolicited status updates
+  defaultChannelId: ""
+
+# --- Tools ---
+tools:
+  shell:
+    shellPath: "/bin/bash"
+    workingDirectory: "/workspace"
+    auditLogDirectory: "/workspace/task_logs"
+    timeoutSeconds: 120
+    # Commands matching any pattern below require Slack approval before execution.
+    safetyPatterns:
+      - "kubectl delete"
+      - "kubectl drain"
+      - "helm uninstall"
+      - "helm rollback"
+      - "flux suspend"
+      - "rm -rf"
+      - "DROP TABLE"
+      - "DROP DATABASE"
+
+  memory:
+    # Must point to the same PostgreSQL instance — pgvector extension required.
+    connectionString: "Host=localhost;Port=5432;Database=victor;Username=victor;Password=changeme"
+    # Number of memories returned per recall query.
+    recallTopK: 5
+
+# --- Orchestration ---
+orchestration:
+  # Path to the persona file (e.g. a Markdown file mounted via a k8s ConfigMap).
+  # The file is read once at startup and used as the LLM system prompt.
+  # In Kubernetes: mount the ConfigMap key to /config/persona.md and set this path.
+  # Leave empty (and set systemPrompt inline below) for local dev without a file.
+  systemPromptFile: "/config/persona.md"
+
+  # Inline system prompt — used only when systemPromptFile is empty or unset.
+  systemPrompt: ""
+
+  research:
+    type: Research
+    allowedTools:
+      - shell
+      - memory
+    # ISO 8601 duration or hh:mm:ss — how long to wait for approval before timing out.
+    approvalTimeout: "00:05:00"
+    safetyPatterns: []
+
+  planning:
+    type: Planning
+    allowedTools:
+      - memory
+    approvalTimeout: "00:05:00"
+    safetyPatterns: []
+
+  execution:
+    type: Execution
+    allowedTools:
+      - shell
+      - memory
+    approvalTimeout: "00:01:00"
+    # Execution-phase safety patterns are additive to the shell-level ones.
+    safetyPatterns:
+      - "kubectl delete"
+      - "kubectl drain"
+      - "helm uninstall"
+
+# --- Serilog ---
+# Full Serilog configuration via Microsoft.Extensions.Configuration.
+# See https://github.com/serilog/serilog-settings-configuration for all options.
+serilog:
+  minimumLevel:
+    default: Information
+    override:
+      Microsoft: Warning
+      Microsoft.EntityFrameworkCore.Database.Command: Warning
+      System.Net.Http.HttpClient: Warning

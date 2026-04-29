@@ -1,0 +1,76 @@
+# Victor — local development config
+# Copy this file and fill in real values. Never commit secrets.
+
+keyVault:
+  endpoint: ""
+
+database:
+  connectionString: "Host=localhost;Port=5432;Database=victor;Username=victor;Password=changeme"
+
+llm:
+  openai:
+    apiKey: ""
+    model: "gpt-4o"
+    embeddingModel: "text-embedding-3-small"
+    embeddingDimensions: 1536
+
+slack:
+  botToken: ""
+  appToken: ""
+  defaultChannelId: ""
+
+tools:
+  shell:
+    shellPath: "/bin/bash"
+    workingDirectory: "/workspace"
+    auditLogDirectory: "/workspace/task_logs"
+    timeoutSeconds: 120
+    safetyPatterns:
+      - "kubectl delete"
+      - "kubectl drain"
+      - "helm uninstall"
+      - "rm -rf"
+
+  memory:
+    connectionString: "Host=localhost;Port=5432;Database=victor;Username=victor;Password=changeme"
+    recallTopK: 5
+
+orchestration:
+  # For local dev: point to a local .md file, or leave blank and set systemPrompt inline.
+  systemPromptFile: ""
+  systemPrompt: |
+    You are Victor, a senior DevOps engineer. Research first, plan, then execute.
+    Speak in first person. Never delete production resources without approval.
+
+  research:
+    type: Research
+    allowedTools:
+      - shell
+      - memory
+    approvalTimeout: "00:05:00"
+    safetyPatterns: []
+
+  planning:
+    type: Planning
+    allowedTools:
+      - memory
+    approvalTimeout: "00:05:00"
+    safetyPatterns: []
+
+  execution:
+    type: Execution
+    allowedTools:
+      - shell
+      - memory
+    approvalTimeout: "00:01:00"
+    safetyPatterns:
+      - "kubectl delete"
+      - "helm uninstall"
+
+serilog:
+  minimumLevel:
+    default: Debug
+    override:
+      Microsoft: Warning
+      Microsoft.EntityFrameworkCore.Database.Command: Warning
+      System.Net.Http.HttpClient: Warning

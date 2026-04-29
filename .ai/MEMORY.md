@@ -1,0 +1,22 @@
+# Memory
+
+Agent memory for this project. Keep entries brief — one or two lines each.
+
+## User
+- Rudolf is the developer on this project.
+- Rudolf is also the author of Firefly.DependencyInjection.
+
+## Feedback
+- First LLM provider to implement is OpenAI, not Anthropic.
+- Config files must be YAML, never JSON.
+- Always update `.ai/ARCHITECTURE.md` when adding/modifying/deleting a component — standing rule.
+- Use Firefly.DependencyInjection for DI (attributes), not manual ServiceCollectionExtensions.
+- Keep core abstractions provider-agnostic (e.g. IEmbeddingProvider, not hardwired OpenAI).
+- Use EF Core + migrations for database access, not raw SQL.
+- DbContext belongs at app-wide level (Victor.Core), not per-module. User plans to persist more state (e.g. jobs).
+- Use Directory.Packages.props for centralized NuGet version management.
+
+## Project State
+- Done: Victor.Core, Providers.OpenAI, Tools.Shell, Orchestrator loop, Victor.Slack, Tools.Memory.
+- Anthropic provider skipped by user.
+- Next: Victor.Host, then Dockerfile + k8s manifests.

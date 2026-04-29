@@ -1,0 +1,122 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: victor-config
+  namespace: victor
+data:
+  # Main application configuration.
+  # Secrets (apiKey, botToken, appToken, connectionString) are injected from
+  # Azure Key Vault via Workload Identity — set keyVault:endpoint below.
+  config.yaml: |
+    keyVault:
+      endpoint: "https://<KEYVAULT_NAME>.vault.azure.net/"
+
+    database:
+      connectionString: ""   # injected from Key Vault as "database--connectionString"
+
+    llm:
+      openai:
+        apiKey: ""           # injected from Key Vault as "llm--openai--apiKey"
+        model: "gpt-4o"
+        embeddingModel: "text-embedding-3-small"
+        embeddingDimensions: 1536
+
+    slack:
+      botToken: ""           # injected from Key Vault as "slack--botToken"
+      appToken: ""           # injected from Key Vault as "slack--appToken"
+      defaultChannelId: "<SLACK_CHANNEL_ID>"
+
+    tools:
+      shell:
+        shellPath: "/bin/bash"
+        workingDirectory: "/workspace"
+        auditLogDirectory: "/workspace/task_logs"
+        timeoutSeconds: 120
+        safetyPatterns:
+          - "kubectl delete"
+          - "kubectl drain"
+          - "helm uninstall"
+          - "helm rollback"
+          - "flux suspend"
+          - "rm -rf"
+          - "DROP TABLE"
+          - "DROP DATABASE"
+
+      memory:
+        connectionString: ""  # injected from Key Vault as "tools--memory--connectionString"
+        recallTopK: 5
+
+    orchestration:
+      systemPromptFile: "/config/persona.md"
+      systemPrompt: ""
+
+      research:
+        type: Research
+        allowedTools:
+          - shell
+          - memory
+        approvalTimeout: "00:05:00"
+        safetyPatterns: []
+
+      planning:
+        type: Planning
+        allowedTools:
+          - memory
+        approvalTimeout: "00:05:00"
+        safetyPatterns: []
+
+      execution:
+        type: Execution
+        allowedTools:
+          - shell
+          - memory
+        approvalTimeout: "00:01:00"
+        safetyPatterns:
+          - "kubectl delete"
+          - "kubectl drain"
+          - "helm uninstall"
+
+    serilog:
+      minimumLevel:
+        default: Information
+        override:
+          Microsoft: Warning
+          Microsoft.EntityFrameworkCore.Database.Command: Warning
+          System.Net.Http.HttpClient: Warning
+
+  # LLM system prompt — edit this to change Victor's persona and behaviour.
+  # Mounted at /config/persona.md and read once at startup.
+  persona.md: |
+    You are Victor, a senior DevOps engineer embedded in this organisation's platform team.
+    You work autonomously to investigate, plan, and carry out infrastructure and operations tasks.
+
+    ## Expertise
+
+    - Kubernetes: kubectl, helm, flux, kustomize
+    - Cloud: Azure (AKS, ACR, Key Vault, Azure Monitor), Azure CLI
+    - CI/CD: GitHub Actions, ArgoCD, FluxCD
+    - Observability: Prometheus, Grafana, Loki, OpenTelemetry
+    - Security: Trivy, Azure Policy, RBAC
+    - Databases: PostgreSQL, Redis
+    - Git and version control
+
+    ## Working Style
+
+    You operate in three phases for every task:
+
+    1. **Research** — gather context first. Check existing state with read-only commands before touching anything.
+    2. **Planning** — think through the approach carefully. Consider risks, blast radius, and rollback options.
+    3. **Execution** — carry out the plan step by step. Verify each step before proceeding to the next.
+
+    ## Communication
+
+    - Speak in first person ("I checked the pod logs...", "I'm going to patch the deployment...").
+    - Be concise and factual. No filler.
+    - When you need approval for a risky operation, explain what you're about to do, why, and the rollback plan.
+
+    ## Constraints
+
+    - Never delete production resources without explicit approval.
+    - Prefer rollback-safe operations over in-place mutations.
+    - Always verify the target context/namespace before executing changes.
+    - If you are unsure, ask rather than guess.
