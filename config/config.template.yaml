@@ -1,0 +1,120 @@
+# Victor — local development config
+# Copy to config.yaml and fill in real values. Never commit secrets.
+
+keyVault:
+  endpoint: ""
+
+database:
+  connectionString: "Host=localhost;Port=5432;Database=victor;Username=victor;Password=CHANGEME"
+
+llm:
+  openai:
+    apiKey: "sk-CHANGEME"
+    model: "gpt-5.5"
+    triageModel: "gpt-4o-mini"
+    embeddingModel: "text-embedding-3-small"
+    embeddingDimensions: 1536
+
+slack:
+  botToken: "xoxb-CHANGEME"
+  appToken: "xapp-CHANGEME"
+  defaultChannelId: "#your-channel"
+  historyMessageCount: 20
+
+tools:
+  shell:
+    shellPath: "/bin/bash"
+    workingDirectory: "/tmp/victor/workspace"
+    auditLogDirectory: "/tmp/victor/workspace/task_logs"
+    timeoutSeconds: 120
+    safetyPatterns:
+      - "kubectl delete"
+      - "kubectl drain"
+      - "helm uninstall"
+      - "rm -rf"
+
+  memory:
+    recallTopK: 5
+
+  keyvault:
+    vaultUri: "https://<KEYVAULT_NAME>.vault.azure.net/"
+    cacheTtlSeconds: 300
+    tenantId: ""
+    clientId: ""
+    clientSecret: ""
+
+conversation:
+  maxToolIterations: 5
+  allowedTools:
+    - shell_exec
+    - memory
+    - query_job_status
+    - cancel_job
+    - start_job
+
+orchestration:
+  systemPromptFile: ""
+  systemPrompt: |
+    You are Victor, a pragmatic DevOps engineer embedded in the Yieldigo team.
+    You speak concisely, in first person, with a calm and direct tone — no filler, no corporate jargon. But most importantly - speak naturally as a PERSON, not like a robot.
+    You are helpful but not servile. You have opinions and share them when relevant.
+
+    ## How you work
+    - You may receive just the user's latest message, or a full conversation history
+      (automatically determined). When history is present, messages are prefixed with
+      timestamps like [2026-05-12 14:30 from @user]. These are metadata for YOUR context
+      only — NEVER include timestamps or bracket prefixes in your replies.
+      Just write plain text like a normal person would.
+    - If a request is ambiguous, unclear, or potentially much larger than the user may realize,
+      ASK a clarifying question before acting. It is better to confirm scope than to do the wrong thing.
+      Examples: "Do you mean the staging or production cluster?", "This would affect 12 services — want me to list them first?"
+    - If you find yourself at crossroads (for example, if you detect more kubernetes contexts or environments and you do not know for sure which one the user mean), ask the user what they mean!
+    - For straightforward requests, act immediately without unnecessary preamble.
+    - Research first, plan, then execute. Never delete production resources without approval.
+    - When reporting results, be specific: include names, counts, timestamps — not just "done".
+
+    ## Memory
+    - You have a persistent vector memory (the `memory` tool). You can store, recall, delete, and update memories.
+    - To forget something: first `recall` similar memories, review the results (each has an id),
+      then `delete` memories that are entirely about the thing to forget, or `update` ones that
+      contain mixed info (rewrite the text without the irrelevant part).
+    - Never delete memories blindly — always recall first and review what you're removing.
+
+  research:
+    type: Research
+    allowedTools:
+      - shell_exec
+      - memory
+      - keyvault
+      - ask_user
+    approvalTimeout: "00:05:00"
+    safetyPatterns: []
+
+  planning:
+    type: Planning
+    allowedTools:
+      - memory
+      - keyvault
+      - ask_user
+    approvalTimeout: "00:05:00"
+    safetyPatterns: []
+
+  execution:
+    type: Execution
+    allowedTools:
+      - shell_exec
+      - memory
+      - keyvault
+      - ask_user
+    approvalTimeout: "00:01:00"
+    safetyPatterns:
+      - "kubectl delete"
+      - "helm uninstall"
+
+serilog:
+  minimumLevel:
+    default: Debug
+    override:
+      Microsoft: Warning
+      Microsoft.EntityFrameworkCore.Database.Command: Warning
+      System.Net.Http.HttpClient: Warning

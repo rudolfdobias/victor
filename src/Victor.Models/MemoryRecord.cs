@@ -1,6 +1,6 @@
 using Pgvector;
 
-namespace Victor.Core.Models;
+namespace Victor.Models;
 
 public class MemoryRecord
 {

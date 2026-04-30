@@ -1,5 +1,24 @@
-bin/
-obj/
-/packages/
+# Build artifacts
+**/bin/
+**/obj/
+
+# Roslyn/OmniSharp BuildHost creates Windows-style paths on macOS (literal backslash in dir name)
+**/bin\\*/
+**/obj\\*/
+
+# NuGet
+**/packages/
+
+# JetBrains Rider
+.idea/
 riderModule.iml
 /_ReSharper.Caches/
+
+# Visual Studio
+.vs/
+*.user
+
+# OS
+.DS_Store
+Thumbs.db
+

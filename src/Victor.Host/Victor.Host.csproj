@@ -7,7 +7,7 @@
 
   <ItemGroup>
     <PackageReference Include="Azure.Extensions.AspNetCore.Configuration.Secrets" />
-    <PackageReference Include="Azure.Identity" />
+<PackageReference Include="Azure.Identity" />
     <PackageReference Include="Firefly.DependencyInjection" />
     <PackageReference Include="Microsoft.Extensions.Diagnostics.HealthChecks.EntityFrameworkCore" />
     <PackageReference Include="NetEscapades.Configuration.Yaml" />
@@ -17,15 +17,17 @@
   </ItemGroup>
 
   <ItemGroup>
+    <ProjectReference Include="../Victor.Models/Victor.Models.csproj" />
     <ProjectReference Include="../Victor.Core/Victor.Core.csproj" />
     <ProjectReference Include="../Victor.Providers.OpenAI/Victor.Providers.OpenAI.csproj" />
     <ProjectReference Include="../Victor.Slack/Victor.Slack.csproj" />
+    <ProjectReference Include="../Victor.Tools.AzureKeyVault/Victor.Tools.AzureKeyVault.csproj" />
     <ProjectReference Include="../Victor.Tools.Memory/Victor.Tools.Memory.csproj" />
     <ProjectReference Include="../Victor.Tools.Shell/Victor.Tools.Shell.csproj" />
   </ItemGroup>
 
   <ItemGroup>
-    <None Update="config.yaml">
+    <None Include="..\..\config\config.yaml" Link="ConfigFiles\config.yaml">
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
     </None>
   </ItemGroup>

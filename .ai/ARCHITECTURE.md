@@ -51,12 +51,60 @@ Use `b.PickSingleImplementation<TInterface, TConcrete>()` for conditional select
 | Providers.*   |    | Shell, Memory     |
 | OpenAI, ...   |    +-------------------+
 +---------------+
+       |                       |
+       +----------+------------+
+                  |
+         +--------v--------+      +--------------------+
+         | Victor.Models   |<-----| Victor.Migrator    |  EF migrations,
+         | (data layer)    |      | (migration runner) |  IDesignTimeDbContextFactory,
+         | EF entities,    |      | dotnet ef / k8s    |  Program.cs (DATABASE_URL)
+         | VictorDbContext |      +--------------------+
+         +-----------------+
 ```
+
+## Victor.Models (`src/Victor.Models/`)
+
+Thin data layer. EF Core entities and `VictorDbContext` live here.
+No business logic, no migrations. Referenced by Victor.Core, Victor.Migrator, and any project that needs DB access.
+Package versions centralized via `Directory.Packages.props`.
+
+```csharp
+Job                                           // EF entity: Id, Description, RequestedBy, ChannelId, ThreadTs, Status (Queued|Running|Completed|Failed|Cancelled), CurrentPhase, LastStatusMessage, Result, Error, timestamps
+MemoryRecord                                  // EF entity: Id, Timestamp, TaskId, Category, Summary, Embedding (vector)
+VictorDbContext                               // DbSet<Job>, DbSet<MemoryRecord>, pgvector extension
+```
+
+Registered via `IDbContextFactory<VictorDbContext>` in Victor.Host.
+
+---
+
+## Victor.Migrator (`src/Victor.Migrator/`)
+
+Dedicated migration runner. Executable project — used locally for `dotnet ef` commands and
+as a dedicated init-container in Kubernetes for applying migrations before the main pod starts.
+
+```csharp
+VictorDbContextFactory : IDesignTimeDbContextFactory<VictorDbContext>  // design-time only; reads DATABASE_URL or localhost fallback
+Migrations/                                   // EF migrations generated against Victor.Models.VictorDbContext
+Program.cs                                    // reads DATABASE_URL env var, calls Database.MigrateAsync(), exits
+```
+
+To add a migration (run from repo root or from `src/Victor.Migrator/`):
+```
+cd src/Victor.Migrator
+dotnet ef migrations add <Name>
+```
+
+To apply migrations locally:
+```
+DATABASE_URL="Host=localhost;..." dotnet run --project src/Victor.Migrator
+```
+
+---
 
 ## Victor.Core (`src/Victor.Core/`)
 
-Central library. EF Core + Npgsql + pgvector for shared `VictorDbContext`.
-Package versions centralized via `Directory.Packages.props`.
+Central library. References Victor.Models for DB types.
 
 ### Abstractions
 
@@ -65,9 +113,13 @@ interface ILLMProvider          // CompleteAsync, StreamAsync
 interface IEmbeddingProvider    // GetEmbeddingAsync (provider-agnostic)
 interface ITool                 // Name, Description, InputSchema, ExecuteAsync
 interface IApprovalGateway      // RequestApprovalAsync (for safety-gated commands)
+interface IMessageClassifier        // NeedsHistoryAsync — cheap triage model classifies standalone vs follow-up
+interface IConversationHistoryProvider // GetHistoryAsync — on-demand history fetch, impl by SlackHistoryService
+interface IUserQueryGateway    // AskAsync — posts free-form question, waits for user's text reply
+interface IJobStatusNotifier    // NotifyPhaseStarted (no-op), NotifyPhaseCompleted, NotifyJobCompleted/Failed
 ```
 
-### Models
+### Domain Models
 
 | Record | Purpose |
 |--------|---------|
@@ -76,13 +128,17 @@ interface IApprovalGateway      // RequestApprovalAsync (for safety-gated comman
 | `LLMResponse(Content, StopReason, ToolUses?)` | LLM reply |
 | `ToolUse(Id, ToolName, Input)` | LLM-requested tool call |
 | `ToolResult(ToolUseId, Output, IsError)` | Tool execution result |
-| `Job` | EF entity: Id, Description, RequestedBy, Status, Result, Error, timestamps |
-| `MemoryRecord` | EF entity: Id, Timestamp, TaskId, Category, Summary, Embedding (vector) |
+
+EF entities (`Job`, `MemoryRecord`) live in **Victor.Models**.
 
 ### Orchestration
 
 ```csharp
-[RegisterSingleton] Orchestrator              // IOptions<OrchestratorOptions>, ILLMProvider, IEnumerable<ITool>, IApprovalGateway
+[RegisterSingleton] Orchestrator              // IOptions<OrchestratorOptions>, ILLMProvider, IEnumerable<ITool>, IApprovalGateway, JobQueue
+                                              // Writes Job.CurrentPhase + LastStatusMessage at phase transitions and tool calls
+                                              // Sets AskUserTool.CurrentJob before each run so ask_user has channel context
+[RegisterSingleton] AskUserTool : ITool       // Posts question to Slack via IUserQueryGateway, blocks until user replies (10min timeout)
+                                              // Available in all orchestration phases (Research, Planning, Execution)
 OrchestratorOptions                           // SystemPrompt, Research/Planning/Execution PhaseConfigs (section "orchestration")
 PhaseConfig                                   // Type, AllowedTools, ApprovalTimeout, SafetyPatterns
 ```
@@ -90,27 +146,53 @@ PhaseConfig                                   // Type, AllowedTools, ApprovalTim
 ```
 Job arrives via JobQueue
   -> JobProcessorService (BackgroundService, reads channel)
-       -> Orchestrator.RunAsync(job)
+       -> Registers per-job CancellationTokenSource (linked to host stopping token)
+       -> Orchestrator.RunAsync(job, conversationHistory?, jobCt)
             -> Phase: Research   (read-only tools, gather context)
             -> Phase: Planning   (reason about approach, produce plan)
             -> Phase: Execution  (mutating tools, carry out plan)
+       -> On OperationCanceledException (job ct, not host): marks Cancelled
+       -> Unregisters CTS on completion
 ```
 
 Each phase: LLM loop with tool calls filtered by `PhaseConfig.AllowedTools`.
 Commands matching `PhaseConfig.SafetyPatterns` go through `IApprovalGateway`.
 
-### Data
+**Job cancellation:** `JobQueue` tracks a `ConcurrentDictionary<Guid, CTS>` for running jobs.
+`CancelJobAsync(id)` signals running jobs or directly marks queued jobs as `Cancelled`.
+
+### Conversation (Tier 1 — synchronous)
 
 ```csharp
-VictorDbContext                               // DbSet<Job>, DbSet<MemoryRecord>, pgvector extension
+[RegisterSingleton] ConversationHandler          // LLM loop with read-only tool whitelist + start_job pseudo-tool,
+                                                  // iteration cap, active-job context injection (phase + status), uses OrchestratorOptions.SystemPrompt
+                                                  // Receives either single message (standalone) or full history (follow-up, per triage)
+ConversationHandlerOptions                        // MaxToolIterations, AllowedTools (section "conversation")
+[RegisterSingleton] ConversationQueue             // ConcurrentDictionary<string, SemaphoreSlim> — per-conversation serialization
+[RegisterSingleton] QueryJobStatusTool : ITool    // Queries Job by ID or lists active jobs (status, phase, last update)
+[RegisterSingleton] CancelJobTool : ITool         // Cancels a running or queued job by ID via JobQueue.CancelJobAsync
 ```
 
-Shared across the entire app. Registered via `IDbContextFactory<VictorDbContext>`.
+```
+Slack message arrives
+  -> SlackListenerService checks for pending ask_user query → route reply if found
+  -> Otherwise:
+       -> IMessageClassifier.NeedsHistoryAsync (cheap/fast triage model, e.g. gpt-4o-mini)
+            -> STANDALONE: pass only the current message
+            -> FOLLOW_UP: fetch history via SlackHistoryService, pass full context
+       -> ConversationQueue.ExecuteAsync(conversation_id, ...)
+            -> ConversationHandler.HandleAsync(messages, userId)
+                 -> LLM decides: text reply / tool call / start_job / cancel_job
+                 -> If start_job: enqueues to JobQueue (Tier 2)
+                 -> If cancel_job: signals cancellation via JobQueue
+            -> SlackNotifier posts reply
+```
 
-### JobQueue
+### JobQueue (Tier 2 — asynchronous)
 
 ```csharp
 [RegisterSingleton] JobQueue                  // Channel<Guid> + EF persistence via IDbContextFactory
+                                              // + ConcurrentDictionary<Guid, IReadOnlyList<Message>> for conversation context
 [RegisterSingleton] JobProcessorService : BackgroundService  // Reads queue, drives Orchestrator, persists job status
 ```
 
@@ -122,8 +204,9 @@ Implements `ILLMProvider` against the OpenAI Chat Completions API.
 Uses `OpenAI` NuGet v2.2. Translates `LLMRequest` <-> OpenAI models.
 
 ```csharp
-OpenAIOptions                                   // ApiKey, Model, EmbeddingModel, EmbeddingDimensions (section "llm:openai")
+OpenAIOptions                                   // ApiKey, Model, TriageModel, EmbeddingModel, EmbeddingDimensions (section "llm:openai")
 [RegisterSingleton] OpenAILLMProvider : ILLMProvider        // CompleteAsync maps tool calls, StreamAsync yields text
+[RegisterSingleton] OpenAIMessageClassifier : IMessageClassifier  // Uses TriageModel (cheap) to classify standalone vs follow-up
 [RegisterSingleton] OpenAIEmbeddingProvider : IEmbeddingProvider  // text-embedding-3-small, configurable dimensions
 ```
 
@@ -144,14 +227,36 @@ Input schema: `{ "command": "string" }`. Timeout kills process tree.
 
 ---
 
+## Victor.Tools.AzureKeyVault (`src/Victor.Tools.AzureKeyVault/`)
+
+Dedicated ITool for reading and writing Azure Key Vault secrets. Victor must use this
+instead of shell commands for all secret operations — cleaner audit trail, works
+transparently with pod Workload Identity, and benefits from in-process caching.
+
+```csharp
+AzureKeyVaultOptions                              // VaultUri, CacheTtlSeconds (section "tools:keyvault")
+[RegisterSingleton(Type = typeof(ITool))]
+AzureKeyVaultTool : ITool                         // actions: get | set | list | delete
+                                                  // SecretClient via DefaultAzureCredential
+                                                  // ConcurrentDictionary cache with TTL (get/set write-through)
+```
+
+Input schema: `{ "action": "get|set|list|delete", "name": "string", "value": "string (set only)" }`
+`list` returns enabled secret names only (no values).
+`delete` initiates Key Vault soft-delete.
+NuGet: `Azure.Security.KeyVault.Secrets`, `Azure.Identity`
+
+---
+
 ## Victor.Tools.Memory (`src/Victor.Tools.Memory/`)
 
 Uses `IEmbeddingProvider` (provider-agnostic) and shared `VictorDbContext` from Core.
 
 ```csharp
 MemoryOptions                                    // RecallTopK (section "tools:memory")
-[RegisterScoped] MemoryStore                      // Uses VictorDbContext: StoreAsync, RecallAsync (cosine distance)
-[RegisterScoped] MemoryTool : ITool               // action: "store" | "recall", uses IEmbeddingProvider + MemoryStore
+[RegisterScoped] MemoryStore                      // Uses VictorDbContext: StoreAsync, RecallAsync (cosine distance), DeleteAsync, UpdateAsync
+[RegisterScoped] MemoryTool : ITool               // action: "store" | "recall" | "delete" | "update", uses IEmbeddingProvider + MemoryStore
+                                                   // recall returns IDs; delete removes by ID; update rewrites text + re-embeds
 ```
 
 ## Victor.Slack (`src/Victor.Slack/`)
@@ -161,10 +266,24 @@ Slack integration via SlackNet (Web API) + raw WebSocket Socket Mode.
 and `IHttpClientFactory` (can't use Firefly for third-party library wiring).
 
 ```csharp
-SlackOptions                                     // BotToken, AppToken, DefaultChannelId (section "slack")
+SlackOptions                                     // BotToken, AppToken, DefaultChannelId, HistoryMessageCount (section "slack")
 [RegisterSingleton] SlackNotifier                 // PostMessageAsync (threads), UpdateMessageAsync, SetPresenceAsync
 [RegisterSingleton] SlackApprovalGateway : IApprovalGateway  // Posts approve/reject buttons, waits via ConcurrentDictionary<TCS>
-[RegisterSingleton] SlackListenerService : IHostedService    // Socket Mode via raw WebSocket, enqueues jobs, routes button clicks
+[RegisterSingleton] SlackUserQueryGateway : IUserQueryGateway // Posts question text, waits for free-form user reply via TCS
+                                                   // SlackListenerService routes replies to pending queries before ConversationHandler
+[RegisterSingleton] SlackHistoryService            // Fetches conversations.history / conversations.replies,
+                                                   // resolves bot user ID via auth.test, caches user display names,
+                                                   // maps Slack messages to Message(Role, Content) with timestamps
+                                                   // Format: "[YYYY-MM-DD HH:mm from @user] text" / "[YYYY-MM-DD HH:mm] text"
+                                                   // Filters out automated status messages by pattern matching (old hardcoded + prefixed)
+[RegisterSingleton] SlackJobStatusNotifier : IJobStatusNotifier  // Phase-start: no-op (log only, no Slack message)
+                                                   // Phase-completed: posts LLM-generated plan summary
+                                                   // Job completed/failed: posts LLM result or natural error message
+[RegisterSingleton] SlackListenerService : IHostedService    // Socket Mode via raw WebSocket, routes messages through:
+                                                   // 1. Pending ask_user queries (SlackUserQueryGateway.HandleReply)
+                                                   // 2. ConversationQueue → ConversationHandler (normal flow)
+                                                   // 3. Button clicks → SlackApprovalGateway
+                                                   // Replies in main channel for channel msgs, in-thread for threaded msgs
 SlackServiceExtensions.AddVictorSlack(config)     // ISlackApiClient + IHttpClientFactory + options binding
 ```
 
@@ -177,9 +296,10 @@ Program.cs
   AddYamlFile(config.yaml)          // /config/config.yaml (k8s) or local config.yaml (dev)
   AddAzureKeyVault(...)              // optional; skipped when keyVault:endpoint is empty
   UseSerilog(...)                    // structured console logging, config-driven
-  AddFireflyServiceRegistration(b => b.UseAssembly(...)) // scans all project assemblies
+  AddFireflyServiceRegistration(b => b.UseAssembly(...)) // scans all project assemblies (incl. Victor.Models)
   AddVictorSlack(config)             // SlackNet manual wiring
   AddDbContextFactory<VictorDbContext>(UseNpgsql + UseVector)
+  Configure<ConversationHandlerOptions> // section "conversation"
   Configure<OrchestratorOptions>     // section "orchestration"
   PostConfigure<OrchestratorOptions> // reads orchestration:systemPromptFile into SystemPrompt
   Configure<OpenAIOptions>           // section "llm:openai"

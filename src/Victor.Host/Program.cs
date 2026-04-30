@@ -5,10 +5,13 @@ using Microsoft.AspNetCore.Diagnostics.HealthChecks;
 using Microsoft.EntityFrameworkCore;
 using NetEscapades.Configuration.Yaml;
 using Serilog;
-using Victor.Core.Data;
+using Victor.Core.JobQueue;
+using Victor.Models;
+using Victor.Core.Conversation;
 using Victor.Core.Orchestration;
 using Victor.Providers.OpenAI;
 using Victor.Slack;
+using Victor.Tools.AzureKeyVault;
 using Victor.Tools.Memory;
 using Victor.Tools.Shell;
 
@@ -18,7 +21,9 @@ var builder = WebApplication.CreateBuilder(args);
 // In Kubernetes the ConfigMap mounts to /config/config.yaml.
 // For local development, place config.yaml next to the binary.
 builder.Configuration.Sources.Clear();
-var configPath = File.Exists("/config/config.yaml") ? "/config/config.yaml" : "config.yaml";
+var configPath = File.Exists("/config/config.yaml")
+    ? "/config/config.yaml"
+    : Path.Combine(AppContext.BaseDirectory, "ConfigFiles/config.yaml");
 builder.Configuration
     .AddYamlFile(configPath, optional: false, reloadOnChange: true)
     .AddEnvironmentVariables()
@@ -45,11 +50,14 @@ var services = builder.Services;
 // Firefly attribute-based DI — scan all project assemblies
 services.AddFireflyServiceRegistration(b =>
 {
-    b.UseAssembly(typeof(Victor.Core.Orchestration.Orchestrator).Assembly);
-    b.UseAssembly(typeof(OpenAILLMProvider).Assembly);
-    b.UseAssembly(typeof(ShellExecTool).Assembly);
-    b.UseAssembly(typeof(MemoryTool).Assembly);
-    b.UseAssembly(typeof(SlackListenerService).Assembly);
+    b.UseAssembly("Victor.Models");
+    b.UseAssembly("Victor.Core");
+    b.UseAssembly("Victor.Providers.OpenAI");
+    b.UseAssembly("Victor.Slack");
+    b.UseAssembly("Victor.Tools.AzureKeyVault");
+    b.UseAssembly("Victor.Tools.Memory");
+    b.UseAssembly("Victor.Tools.Shell");
+    b.RegisterAllImplementations();
 });
 
 // Slack — manual wiring (SlackNet is a third-party library)
@@ -77,9 +85,11 @@ services.PostConfigure<OrchestratorOptions>(options =>
     }
 });
 
+services.Configure<ConversationHandlerOptions>(builder.Configuration.GetSection(ConversationHandlerOptions.SectionName));
 services.Configure<OpenAIOptions>(builder.Configuration.GetSection(OpenAIOptions.SectionName));
 services.Configure<ShellOptions>(builder.Configuration.GetSection(ShellOptions.SectionName));
 services.Configure<MemoryOptions>(builder.Configuration.GetSection(MemoryOptions.SectionName));
+services.Configure<AzureKeyVaultOptions>(builder.Configuration.GetSection(AzureKeyVaultOptions.SectionName));
 
 // Health checks
 services.AddHealthChecks()
@@ -97,4 +107,24 @@ app.MapHealthChecks("/healthz/ready", new HealthCheckOptions
     Predicate = r => r.Tags.Contains("ready")
 });
 
+// // Test endpoint — enqueue a job without Slack. Not for production use.
+// app.MapPost("/jobs", async (EnqueueRequest req, JobQueue queue, CancellationToken ct) =>
+// {
+//     if (string.IsNullOrWhiteSpace(req.Description))
+//         return Results.BadRequest("description is required");
+//
+//     var job = await queue.EnqueueAsync(req.Description, req.RequestedBy ?? "api", ct);
+//     return Results.Ok(new { job.Id, job.Status, job.CreatedAt });
+// });
+//
+// app.MapGet("/jobs/{id:guid}", async (Guid id, JobQueue queue, CancellationToken ct) =>
+// {
+//     var job = await queue.GetJobAsync(id, ct);
+//     return job is null
+//         ? Results.NotFound()
+//         : Results.Ok(new { job.Id, job.Status, job.Result, job.Error, job.CreatedAt, job.CompletedAt });
+// });
+
 app.Run();
+
+record EnqueueRequest(string Description, string? RequestedBy);

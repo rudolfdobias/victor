@@ -5,6 +5,7 @@ using Microsoft.Extensions.Options;
 using Pgvector;
 using Victor.Core.Abstractions;
 using Victor.Core.Models;
+using Victor.Models;
 
 namespace Victor.Tools.Memory;
 
@@ -17,8 +18,12 @@ public class MemoryTool : ITool
             "properties": {
                 "action": {
                     "type": "string",
-                    "enum": ["store", "recall"],
-                    "description": "Whether to store a new memory or recall existing ones"
+                    "enum": ["store", "recall", "delete", "update"],
+                    "description": "store: save a new memory. recall: search by similarity. delete: remove a memory by id. update: rewrite a memory's text by id (re-embeds automatically)."
+                },
+                "id": {
+                    "type": "string",
+                    "description": "UUID of an existing memory (required for delete and update)"
                 },
                 "task_id": {
                     "type": "string",
@@ -30,10 +35,10 @@ public class MemoryTool : ITool
                 },
                 "text": {
                     "type": "string",
-                    "description": "Text to store or query to search for"
+                    "description": "Text to store, query to search for, or new text for update"
                 }
             },
-            "required": ["action", "text"]
+            "required": ["action"]
         }
         """).RootElement;
 
@@ -61,16 +66,22 @@ public class MemoryTool : ITool
     public async Task<ToolResult> ExecuteAsync(JsonElement input, CancellationToken ct = default)
     {
         var action = input.GetProperty("action").GetString();
-        var text = input.GetProperty("text").GetString()
-                   ?? throw new ArgumentException("Missing 'text' property");
 
         return action switch
         {
-            "store" => await StoreAsync(input, text, ct),
-            "recall" => await RecallAsync(text, ct),
+            "store" => await StoreAsync(input, RequireText(input), ct),
+            "recall" => await RecallAsync(RequireText(input), ct),
+            "delete" => await DeleteAsync(RequireId(input), ct),
+            "update" => await UpdateAsync(RequireId(input), RequireText(input), ct),
             _ => new ToolResult(string.Empty, $"Unknown action: {action}", IsError: true)
         };
     }
+
+    private static string RequireText(JsonElement input) =>
+        input.TryGetProperty("text", out var t) ? t.GetString() ?? throw new ArgumentException("'text' is empty") : throw new ArgumentException("Missing 'text'");
+
+    private static Guid RequireId(JsonElement input) =>
+        input.TryGetProperty("id", out var id) ? Guid.Parse(id.GetString()!) : throw new ArgumentException("Missing 'id'");
 
     private async Task<ToolResult> StoreAsync(JsonElement input, string text, CancellationToken ct)
     {
@@ -110,8 +121,29 @@ public class MemoryTool : ITool
             return new ToolResult(string.Empty, "No relevant memories found.");
 
         var lines = results.Select(r =>
-            $"[{r.Timestamp:yyyy-MM-dd}] [{r.Category}] {r.Summary}");
+            $"[id:{r.Id}] [{r.Timestamp:yyyy-MM-dd}] [{r.Category}] {r.Summary}");
 
         return new ToolResult(string.Empty, string.Join("\n", lines));
+    }
+
+    private async Task<ToolResult> DeleteAsync(Guid id, CancellationToken ct)
+    {
+        var deleted = await _store.DeleteAsync(id, ct);
+        if (!deleted)
+            return new ToolResult(string.Empty, $"Memory {id} not found.", IsError: true);
+
+        _logger.LogInformation("Deleted memory {Id}", id);
+        return new ToolResult(string.Empty, $"Memory {id} deleted.");
+    }
+
+    private async Task<ToolResult> UpdateAsync(Guid id, string newText, CancellationToken ct)
+    {
+        var embeddingData = await _embedding.GetEmbeddingAsync(newText, ct);
+        var updated = await _store.UpdateAsync(id, newText, new Vector(embeddingData), ct);
+        if (updated is null)
+            return new ToolResult(string.Empty, $"Memory {id} not found.", IsError: true);
+
+        _logger.LogInformation("Updated memory {Id}", id);
+        return new ToolResult(string.Empty, $"Memory {id} updated.");
     }
 }

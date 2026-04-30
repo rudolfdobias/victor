@@ -9,7 +9,12 @@
       "WebFetch(domain:raw.githubusercontent.com)",
       "Bash(dotnet package:*)",
       "Bash(dotnet tool:*)",
-      "Read(//Users/rudolfdobias/.nuget/packages/slacknet/0.17.10/lib/**)"
+      "Read(//Users/rudolfdobias/.nuget/packages/slacknet/0.17.10/lib/**)",
+      "Bash(printf '**/bin/\\\\n')",
+      "Bash(git check-ignore:*)",
+      "Bash(find ~/.nuget/packages/slacknet -name *.cs)",
+      "Bash(dotnet run:*)",
+      "Bash(dotnet script:*)"
     ]
   }
 }

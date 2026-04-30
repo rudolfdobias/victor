@@ -7,4 +7,5 @@ public class SlackOptions
     public required string BotToken { get; set; }
     public required string AppToken { get; set; }
     public required string DefaultChannelId { get; set; }
+    public int HistoryMessageCount { get; set; } = 20;
 }

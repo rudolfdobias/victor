@@ -1,7 +1,6 @@
 using Microsoft.EntityFrameworkCore;
-using Victor.Core.Models;
 
-namespace Victor.Core.Data;
+namespace Victor.Models;
 
 public class VictorDbContext : DbContext
 {
@@ -12,6 +11,7 @@ public class VictorDbContext : DbContext
 
     protected override void OnModelCreating(ModelBuilder modelBuilder)
     {
+        modelBuilder.HasDefaultSchema("victor");
         modelBuilder.HasPostgresExtension("vector");
 
         modelBuilder.Entity<Job>(entity =>
@@ -23,6 +23,10 @@ public class VictorDbContext : DbContext
             entity.Property(e => e.RequestedBy).HasColumnName("requested_by");
             entity.Property(e => e.CreatedAt).HasColumnName("created_at").HasDefaultValueSql("now()");
             entity.Property(e => e.Status).HasColumnName("status").HasConversion<string>();
+            entity.Property(e => e.ChannelId).HasColumnName("channel_id");
+            entity.Property(e => e.ThreadTs).HasColumnName("thread_ts");
+            entity.Property(e => e.CurrentPhase).HasColumnName("current_phase");
+            entity.Property(e => e.LastStatusMessage).HasColumnName("last_status_message");
             entity.Property(e => e.Result).HasColumnName("result");
             entity.Property(e => e.Error).HasColumnName("error");
             entity.Property(e => e.CompletedAt).HasColumnName("completed_at");

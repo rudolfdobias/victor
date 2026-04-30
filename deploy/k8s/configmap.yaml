@@ -5,7 +5,7 @@ metadata:
   namespace: victor
 data:
   # Main application configuration.
-  # Secrets (apiKey, botToken, appToken, connectionString) are injected from
+  # Secrets (apiKey, botToken, appToken, database--connectionString) are injected from
   # Azure Key Vault via Workload Identity — set keyVault:endpoint below.
   config.yaml: |
     keyVault:
@@ -43,8 +43,11 @@ data:
           - "DROP DATABASE"
 
       memory:
-        connectionString: ""  # injected from Key Vault as "tools--memory--connectionString"
         recallTopK: 5
+
+      keyvault:
+        vaultUri: "https://<KEYVAULT_NAME>.vault.azure.net/"
+        cacheTtlSeconds: 300
 
     orchestration:
       systemPromptFile: "/config/persona.md"
@@ -55,6 +58,7 @@ data:
         allowedTools:
           - shell
           - memory
+          - keyvault
         approvalTimeout: "00:05:00"
         safetyPatterns: []
 
@@ -62,6 +66,7 @@ data:
         type: Planning
         allowedTools:
           - memory
+          - keyvault
         approvalTimeout: "00:05:00"
         safetyPatterns: []
 
@@ -70,6 +75,7 @@ data:
         allowedTools:
           - shell
           - memory
+          - keyvault
         approvalTimeout: "00:01:00"
         safetyPatterns:
           - "kubectl delete"

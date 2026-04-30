@@ -1,7 +1,7 @@
 using Firefly.DependencyInjection;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
-using Victor.Core.Models;
+using Victor.Models;
 using Victor.Core.Orchestration;
 
 namespace Victor.Core.JobQueue;
@@ -11,15 +11,18 @@ public class JobProcessorService : BackgroundService
 {
     private readonly JobQueue _queue;
     private readonly Orchestrator _orchestrator;
+    private readonly IJobStatusNotifier _statusNotifier;
     private readonly ILogger<JobProcessorService> _logger;
 
     public JobProcessorService(
         JobQueue queue,
         Orchestrator orchestrator,
+        IJobStatusNotifier statusNotifier,
         ILogger<JobProcessorService> logger)
     {
         _queue = queue;
         _orchestrator = orchestrator;
+        _statusNotifier = statusNotifier;
         _logger = logger;
     }
 
@@ -36,17 +39,36 @@ public class JobProcessorService : BackgroundService
                 continue;
             }
 
+            // Skip jobs that were cancelled while queued
+            if (job.Status == JobStatus.Cancelled)
+            {
+                _logger.LogInformation("Job {JobId} was cancelled while queued, skipping", jobId);
+                continue;
+            }
+
+            var conversationHistory = _queue.TakeConversationContext(jobId);
             job.Status = JobStatus.Running;
             await _queue.UpdateJobAsync(job, stoppingToken);
 
+            using var jobCts = _queue.RegisterJobCts(jobId, stoppingToken);
             try
             {
-                var result = await _orchestrator.RunAsync(job, stoppingToken);
+                var result = await _orchestrator.RunAsync(job, conversationHistory, jobCts.Token);
                 job.Status = JobStatus.Completed;
                 job.Result = result;
                 job.CompletedAt = DateTimeOffset.UtcNow;
                 await _queue.UpdateJobAsync(job, stoppingToken);
+                await _statusNotifier.NotifyJobCompletedAsync(job, stoppingToken);
                 _logger.LogInformation("Job {JobId} completed", job.Id);
+            }
+            catch (OperationCanceledException) when (!stoppingToken.IsCancellationRequested)
+            {
+                job.Status = JobStatus.Cancelled;
+                job.LastStatusMessage = "Cancelled by user";
+                job.CompletedAt = DateTimeOffset.UtcNow;
+                await _queue.UpdateJobAsync(job, stoppingToken);
+                await _statusNotifier.NotifyJobFailedAsync(job, "Job was cancelled.", stoppingToken);
+                _logger.LogInformation("Job {JobId} cancelled", job.Id);
             }
             catch (Exception ex) when (ex is not OperationCanceledException)
             {
@@ -54,7 +76,12 @@ public class JobProcessorService : BackgroundService
                 job.Error = ex.Message;
                 job.CompletedAt = DateTimeOffset.UtcNow;
                 await _queue.UpdateJobAsync(job, stoppingToken);
+                await _statusNotifier.NotifyJobFailedAsync(job, ex.Message, stoppingToken);
                 _logger.LogError(ex, "Job {JobId} failed", job.Id);
+            }
+            finally
+            {
+                _queue.UnregisterJobCts(jobId);
             }
         }
     }

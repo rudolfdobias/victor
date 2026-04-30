@@ -3,7 +3,9 @@ using Firefly.DependencyInjection;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
 using Victor.Core.Abstractions;
+using Victor.Core.JobQueue;
 using Victor.Core.Models;
+using Victor.Models;
 
 namespace Victor.Core.Orchestration;
 
@@ -13,6 +15,8 @@ public class Orchestrator
     private readonly ILLMProvider _llm;
     private readonly IReadOnlyDictionary<string, ITool> _tools;
     private readonly IApprovalGateway _approvalGateway;
+    private readonly IJobStatusNotifier _statusNotifier;
+    private readonly JobQueue.JobQueue _jobQueue;
     private readonly OrchestratorOptions _options;
     private readonly ILogger<Orchestrator> _logger;
 
@@ -20,38 +24,66 @@ public class Orchestrator
         ILLMProvider llm,
         IEnumerable<ITool> tools,
         IApprovalGateway approvalGateway,
+        IJobStatusNotifier statusNotifier,
+        JobQueue.JobQueue jobQueue,
         IOptions<OrchestratorOptions> options,
         ILogger<Orchestrator> logger)
     {
         _llm = llm;
         _tools = tools.ToDictionary(t => t.Name, t => t);
         _approvalGateway = approvalGateway;
+        _statusNotifier = statusNotifier;
+        _jobQueue = jobQueue;
         _options = options.Value;
         _logger = logger;
     }
 
-    public async Task<string> RunAsync(Job job, CancellationToken ct = default)
+    public async Task<string> RunAsync(
+        Job job,
+        IReadOnlyList<Message>? conversationHistory = null,
+        CancellationToken ct = default)
     {
         _logger.LogInformation("Starting job {JobId}: {Description}", job.Id, job.Description);
 
-        var conversation = new List<Message>
+        var conversation = new List<Message>();
+
+        // Seed with conversation history if available (Slack context)
+        if (conversationHistory is { Count: > 0 })
         {
-            new(Role.User, job.Description)
-        };
+            conversation.AddRange(conversationHistory);
+            _logger.LogDebug("Seeded {Count} history messages for job {JobId}",
+                conversationHistory.Count, job.Id);
+        }
+        else
+        {
+            conversation.Add(new Message(Role.User, job.Description));
+        }
 
         var phaseResults = new List<string>();
+        AskUserTool.SetCurrentJob(job);
 
         foreach (var phase in new[] { _options.Research, _options.Planning, _options.Execution })
         {
             _logger.LogInformation("Entering phase {Phase} for job {JobId}", phase.Type, job.Id);
+
+            job.CurrentPhase = phase.Type.ToString();
+            job.LastStatusMessage = $"Starting {phase.Type} phase";
+            await _jobQueue.UpdateJobAsync(job, ct);
+            await _statusNotifier.NotifyPhaseStartedAsync(job, phase.Type, ct);
+
             var result = await RunPhaseAsync(job, phase, conversation, ct);
             phaseResults.Add(result);
+
+            job.LastStatusMessage = $"{phase.Type} phase complete";
+            await _jobQueue.UpdateJobAsync(job, ct);
+            await _statusNotifier.NotifyPhaseCompletedAsync(job, phase.Type, result, ct);
 
             // Feed phase summary into the next phase's context
             conversation.Add(new Message(Role.Assistant, result));
             conversation.Add(new Message(Role.User, $"Phase {phase.Type} complete. Proceed to next phase."));
         }
 
+        AskUserTool.SetCurrentJob(null);
         return phaseResults[^1]; // Return Execution phase result
     }
 
@@ -120,6 +152,10 @@ public class Orchestrator
         }
 
         _logger.LogInformation("Executing tool {Tool} for job {JobId}", toolUse.ToolName, job.Id);
+
+        job.LastStatusMessage = $"Executing {toolUse.ToolName}";
+        await _jobQueue.UpdateJobAsync(job, ct);
+
         return await tool.ExecuteAsync(toolUse.Input, ct);
     }
 
