@@ -86,7 +86,8 @@ public class MemoryTool : ITool
     private async Task<ToolResult> StoreAsync(JsonElement input, string text, CancellationToken ct)
     {
         var taskId = input.TryGetProperty("task_id", out var tid)
-            ? Guid.Parse(tid.GetString()!)
+            && Guid.TryParse(tid.GetString(), out var parsedTid)
+            ? parsedTid
             : Guid.Empty;
 
         var category = input.TryGetProperty("category", out var cat)
